@@ -1,19 +1,30 @@
 """
 动画引擎核心 - Animation Engine Core
-驱动整个动画制作流程的核心系统。
+驱动整个动画制作流程的核心系统。现已接入真实渲染管道。
 """
 
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 import json
+import random
+import math
+
+# 导入真实实现模块
+from .interpolation import interpolate_keyframes, EASING_FUNCTIONS, interpolate_value
+from .renderer import FrameRenderer
+from .exporter import export_video, export_gif, export_apng
+from .particles import ParticleSystem, simulate_particles_frames
+from .keyframe import KeyframeSystem
 
 
 class AnimationEngine:
-    """AI动动画制作核心引擎"""
+    """AI动画制作核心引擎"""
 
     def __init__(self, config: Optional[Dict] = None):
         self.config = config or self._default_config()
         self.presets_dir = Path(__file__).parent.parent / "presets"
+        self.renderer = FrameRenderer()
+        self.keyframe_system = KeyframeSystem()
 
     def _default_config(self) -> Dict:
         return {
@@ -30,31 +41,55 @@ class AnimationEngine:
                         fps: int = 30, width: int = 800, height: int = 600,
                         bg_color: str = "#1a1a2e") -> str:
         """
-        根据文本描述创建动画
+        根据文本描述创建动画 — 真实渲染管道
 
         工作流程:
-        1. AI 解析 prompt → 场景描述 + 动画元素
-        2. 生成关键帧序列
-        3. 补间插值
-        4. 渲染合成
-        5. 导出视频文件
+        1. AI/启发式解析 prompt → 关键帧序列
+        2. 补间插值生成完整帧序列
+        3. 用 Pillow 逐帧渲染为 PIL Image
+        4. 应用特效
+        5. 导出 MP4/GIF 视频文件
         """
-        print(f"  [1/5] 🧠 AI解析场景描述...")
-        scene = self._parse_prompt(prompt, width, height, bg_color)
+        self.renderer = FrameRenderer(width, height, bg_color)
 
-        print(f"  [2/5] 🎯 生成关键帧... ({fps} FPS, {duration}s)")
-        keyframes = self._generate_keyframes(scene, duration, fps)
+        print(f"  [1/5] 🧠 解析场景描述...")
+        keyframe_data = self.keyframe_system.generate_from_description(
+            prompt, width, height, duration
+        )
+        print(f"        生成 {len(keyframe_data)} 个关键帧")
 
-        print(f"  [3/5] 🔄 补间插值... ({len(keyframes)} 关键帧)")
-        frames = self._interpolate_frames(keyframes, fps, duration)
+        print(f"  [2/5] 🔄 补间插值... ({fps} FPS, {duration}s)")
+        frame_data = interpolate_keyframes(keyframe_data, fps, duration)
+        print(f"        生成 {len(frame_data)} 帧")
 
-        print(f"  [4/5] 🎨 渲染帧... ({len(frames)} 帧)")
-        rendered = self._render_frames(frames, width, height)
+        print(f"  [3/5] 🎨 渲染帧...")
+        pil_frames = []
+        for i, fd in enumerate(frame_data):
+            img = self.renderer.render_frame(fd["elements"], bg_color)
+            effects = self._extract_effects(prompt)
+            if effects:
+                img = self.renderer.apply_effects(img, effects)
+            pil_frames.append(img)
+            if i % max(1, len(frame_data) // 5) == 0:
+                print(f"        {i+1}/{len(frame_data)} 帧完成")
+
+        print(f"  [4/5] 🎬 应用特效...")
+        # 全局特效
+        if "blur" in prompt.lower() or "模糊" in prompt:
+            pil_frames = [self.renderer.apply_effects(f, ["blur"]) for f in pil_frames]
 
         print(f"  [5/5] 💾 导出视频...")
-        output_path = self._export(rendered, output, fps)
+        output_path = Path(output)
 
-        return output_path
+        if output_path.suffix.lower() == ".gif":
+            result = export_gif(pil_frames, output, fps, loop=0)
+        elif output_path.suffix.lower() == ".png":
+            result = export_apng(pil_frames, output, fps)
+        else:
+            result = export_video(pil_frames, output, fps)
+
+        print(f"  ✅ 动画已导出: {result} ({len(pil_frames)}帧, {duration}s, {fps}FPS)")
+        return result
 
     def apply_preset(self, preset_name: str, output: str, fps: int = 30) -> str:
         """使用预设模板创建动画"""
@@ -99,15 +134,31 @@ class AnimationEngine:
 
     def particle_effect(self, effect: str, output: str, duration: float = 2.0,
                        fps: int = 30, count: int = 500) -> str:
-        """生成粒子特效"""
-        print(f"  💥 初始化粒子系统: {effect}")
-        particle_system = self._create_particle_system(effect, count)
+        """生成粒子特效 — 真实物理模拟 + 渲染"""
+        print(f"  💥 初始化粒子系统: {effect} ({count}粒子)")
+        system = ParticleSystem(effect, count, self.renderer.width, self.renderer.height)
 
-        print(f"  🎬 模拟粒子物理... ({duration}s)")
-        frames = self._simulate_particles(particle_system, duration, fps)
+        print(f"  🎬 模拟粒子物理... ({duration}s, {fps}FPS)")
+        frame_data = simulate_particles_frames(system, duration, fps)
+        print(f"        模拟了 {len(frame_data)} 帧")
+
+        print(f"  🎨 渲染粒子帧...")
+        pil_frames = []
+        for i, fd in enumerate(frame_data):
+            img = self.renderer.render_frame(fd["elements"])
+            pil_frames.append(img)
+            if i % max(1, len(frame_data) // 5) == 0:
+                print(f"        {i+1}/{len(frame_data)} 帧完成")
 
         print(f"  💾 导出...")
-        return self._export(frames, output, fps)
+        output_path = Path(output)
+        if output_path.suffix.lower() == ".gif":
+            result = export_gif(pil_frames, output, fps)
+        else:
+            result = export_video(pil_frames, output, fps)
+
+        print(f"  ✅ 粒子动画已导出: {result}")
+        return result
 
     def interactive_mode(self):
         """交互式动画创作模式"""
