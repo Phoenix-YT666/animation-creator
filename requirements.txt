@@ -1,0 +1,21 @@
+# 动画制作工具 依赖
+# Animation Creator Dependencies
+
+# 核心依赖
+numpy>=1.21.0
+scipy>=1.7.0
+Pillow>=9.0.0
+opencv-python>=4.5.0
+
+# 动画导出
+imageio>=2.20.0
+imageio-ffmpeg>=0.4.8
+
+# AI集成
+anthropic>=0.30.0
+
+# 进度条
+tqdm>=4.60.0
+
+# 可选: Web UI
+# gradio>=4.0.0
